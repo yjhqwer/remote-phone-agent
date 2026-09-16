@@ -5,69 +5,149 @@ import android.app.Activity
 import android.app.Dialog
 import android.content.ActivityNotFoundException
 import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
 import android.graphics.Color
+import android.hardware.display.DisplayManager
 import android.net.Uri
 import android.net.http.SslError
 import android.os.Build
 import android.os.Bundle
 import android.os.Message
+import android.view.Display
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.Window
-import android.view.WindowInsets
 import android.view.WindowManager
 import android.webkit.CookieManager
+import android.webkit.JavascriptInterface
+import android.webkit.MimeTypeMap
 import android.webkit.SslErrorHandler
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import android.widget.Toast
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsAnimationCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.updateLayoutParams
+import androidx.webkit.WebSettingsCompat
+import androidx.webkit.WebViewFeature
 
 class MainActivity : Activity() {
 
     private var webView: WebView? = null
     private var statusBarBackdrop: View? = null
     private var uploadCallback: ValueCallback<Array<Uri>>? = null
+    private var activePopupDialog: Dialog? = null
 
     // Target Antigravity Google Web Console
     private val targetUrl = "https://antigravity.google.com"
 
+    // Dynamic Predictive Back State tracking (Android 13/14/15)
+    private var isBackCallbackRegistered = false
+    private val backCallback by lazy {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            android.window.OnBackInvokedCallback {
+                val current = webView
+                if (current != null && current.canGoBack()) {
+                    current.goBack()
+                }
+            }
+        } else null
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         configureEdgeToEdge(window)
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            onBackInvokedDispatcher.registerOnBackInvokedCallback(
-                android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT
-            ) { handleBack() }
-        }
-
+        unlockHighRefreshRate(window)
         setupWebViewShell()
 
         if (savedInstanceState == null) {
             webView?.loadUrl(targetUrl)
         } else {
-            webView?.restoreState(savedInstanceState)
+            val restored = webView?.restoreState(savedInstanceState)
+            if (restored == null) {
+                webView?.loadUrl(targetUrl)
+            }
+        }
+    }
+
+    /**
+     * Unlock 144Hz / maximum display panel refresh rate for realme GT Neo5 (ColorOS).
+     */
+    private fun unlockHighRefreshRate(window: Window) {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val display = display ?: (getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager)
+                    ?.getDisplay(Display.DEFAULT_DISPLAY)
+                val maxMode = display?.supportedModes?.maxByOrNull { it.refreshRate }
+                if (maxMode != null && maxMode.refreshRate >= 90f) {
+                    val lp = window.attributes
+                    lp.preferredDisplayModeId = maxMode.modeId
+                    window.attributes = lp
+                }
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                @Suppress("DEPRECATION")
+                val display = windowManager.defaultDisplay
+                val maxMode = display?.supportedModes?.maxByOrNull { it.refreshRate }
+                if (maxMode != null && maxMode.refreshRate >= 90f) {
+                    val lp = window.attributes
+                    lp.preferredDisplayModeId = maxMode.modeId
+                    window.attributes = lp
+                }
+            }
+        } catch (_: Exception) {
+            // Graceful fallback if unsupported
         }
     }
 
     @Suppress("DEPRECATION")
     override fun onBackPressed() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) handleBack()
-    }
-
-    private fun handleBack() {
+        val popup = activePopupDialog
+        if (popup != null && popup.isShowing) {
+            popup.dismiss()
+            return
+        }
         val current = webView
         if (current != null && current.canGoBack()) {
             current.goBack()
         } else {
-            finish()
+            super.onBackPressed()
+        }
+    }
+
+    /**
+     * Dynamically registers OnBackInvokedCallback only when WebView can go back.
+     * When at root, unregisters so native Android 14/15 Predictive Back to Home plays smoothly.
+     */
+    private fun updateBackInvokedCallbackState() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val canGoBack = webView?.canGoBack() == true
+            if (canGoBack && !isBackCallbackRegistered) {
+                backCallback?.let {
+                    onBackInvokedDispatcher.registerOnBackInvokedCallback(
+                        android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT,
+                        it
+                    )
+                    isBackCallbackRegistered = true
+                }
+            } else if (!canGoBack && isBackCallbackRegistered) {
+                backCallback?.let {
+                    onBackInvokedDispatcher.unregisterOnBackInvokedCallback(it)
+                    isBackCallbackRegistered = false
+                }
+            }
         }
     }
 
@@ -78,8 +158,6 @@ class MainActivity : Activity() {
         }
 
         val initialChromeColor = Color.BLACK
-        applyStatusBarContrast(window, initialChromeColor)
-
         val backdrop = View(this).apply {
             setBackgroundColor(initialChromeColor)
         }
@@ -87,6 +165,12 @@ class MainActivity : Activity() {
 
         val browser = WebView(this).apply {
             setBackgroundColor(Color.BLACK)
+            isVerticalScrollBarEnabled = false
+            isHorizontalScrollBarEnabled = false
+            scrollBarStyle = View.SCROLLBARS_INSIDE_OVERLAY
+            overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
+            isLongClickable = true
+            isHapticFeedbackEnabled = true
         }
         webView = browser
 
@@ -98,35 +182,60 @@ class MainActivity : Activity() {
         root.addView(backdrop, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, Gravity.TOP))
         setContentView(root)
 
-        // Safe Area Insets and Keyboard (IME) handling without external library
-        root.setOnApplyWindowInsetsListener { _, insets ->
-            val topSafe = resolveTopSafeInset(insets)
-            val imeBottom = resolveImeInset(insets)
+        // Safe Area Insets and Keyboard (IME) handling:
+        ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
+            val statusInsets = insets.getInsets(WindowInsetsCompat.Type.statusBars())
+            val cutoutInsets = insets.getInsets(WindowInsetsCompat.Type.displayCutout())
+            val navInsets = insets.getInsets(WindowInsetsCompat.Type.navigationBars())
+            val imeInsets = insets.getInsets(WindowInsetsCompat.Type.ime())
 
-            browser.layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            ).apply {
-                topMargin = topSafe
-                bottomMargin = imeBottom
+            val topSafe = maxOf(statusInsets.top, cutoutInsets.top)
+            val bottomInset = maxOf(navInsets.bottom, imeInsets.bottom)
+
+            backdrop.updateLayoutParams<FrameLayout.LayoutParams> {
+                height = topSafe
             }
 
-            backdrop.layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                topSafe,
-                Gravity.TOP
-            )
+            browser.updateLayoutParams<FrameLayout.LayoutParams> {
+                topMargin = topSafe
+                bottomMargin = bottomInset
+            }
 
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) WindowInsets.CONSUMED
-            else insets.consumeSystemWindowInsets()
+            // Return insets unconsumed to allow Chromium's visual viewport to receive insets
+            insets
         }
-        root.requestApplyInsets()
+
+        // Frame-synchronized 144Hz keyboard animation to avoid jitter/flash
+        ViewCompat.setWindowInsetsAnimationCallback(
+            root,
+            object : WindowInsetsAnimationCompat.Callback(DISPATCH_MODE_CONTINUE_ON_SUBTREE) {
+                override fun onProgress(
+                    insets: WindowInsetsCompat,
+                    runningAnimations: MutableList<WindowInsetsAnimationCompat>
+                ): WindowInsetsCompat {
+                    val hasImeAnim = runningAnimations.any {
+                        (it.typeMask and WindowInsetsCompat.Type.ime()) != 0
+                    }
+                    if (hasImeAnim) {
+                        val navInsets = insets.getInsets(WindowInsetsCompat.Type.navigationBars())
+                        val imeInsets = insets.getInsets(WindowInsetsCompat.Type.ime())
+                        val bottomInset = maxOf(navInsets.bottom, imeInsets.bottom)
+
+                        browser.updateLayoutParams<FrameLayout.LayoutParams> {
+                            bottomMargin = bottomInset
+                        }
+                    }
+                    return insets
+                }
+            }
+        )
+
+        updateSystemBarContrast((resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES)
     }
 
     private fun configureCookieManager(browser: WebView) {
         CookieManager.getInstance().apply {
             setAcceptCookie(true)
-            // Critical for Google OAuth redirect flows across accounts.google.com and antigravity.google.com
             setAcceptThirdPartyCookies(browser, true)
         }
     }
@@ -139,11 +248,24 @@ class MainActivity : Activity() {
             databaseEnabled = true
             cacheMode = WebSettings.LOAD_DEFAULT
 
+            // High Refresh Rate & Rendering Optimization
+            offscreenPreRaster = true
+            layoutAlgorithm = WebSettings.LayoutAlgorithm.NORMAL
+
+            // Lock textZoom = 100 to prevent system font scale distortion from breaking code blocks/chat UI
+            textZoom = 100
+
+            // Dark Mode: Google Antigravity provides first-class native CSS dark mode.
+            // Explicitly disallow algorithmic darkening to prevent color inversion glitches on code/badges.
+            if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
+                WebSettingsCompat.setAlgorithmicDarkeningAllowed(this, false)
+            }
+
             // Google OAuth Normalization: Strip '; wv' and 'Version/X.X' to bypass 403: disallowed_useragent
             val defaultUa = userAgentString
             val cleanUa = defaultUa
                 .replace("; wv", "")
-                .replace(Regex("Version/\\d+\\.\\d+\\s?"), "")
+                .replace(Regex("Version/[0-9.]+\\s?"), "")
             userAgentString = cleanUa
 
             // Security Hardening
@@ -151,7 +273,7 @@ class MainActivity : Activity() {
             allowFileAccess = false
             allowContentAccess = false
 
-            // Viewport & Popup support
+            // Viewport & Window controls
             useWideViewPort = true
             loadWithOverviewMode = true
             setSupportZoom(true)
@@ -162,45 +284,58 @@ class MainActivity : Activity() {
             javaScriptCanOpenWindowsAutomatically = true
         }
 
+        // Native Clipboard Bridge for reliable code block copying
+        browser.addJavascriptInterface(ClipboardBridge(this), "AntigravityNative")
+
         WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG)
     }
 
     private fun setupWebClients(browser: WebView) {
         browser.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
-                val url = request.url.toString()
-                // Allow Google OAuth and Antigravity domains internally
-                if (url.contains("google.com") || url.contains("google.cn") || url.contains("gstatic.com")) {
+                val uri = request.url
+                if (isTrustedInternalOrAuthHost(uri)) {
                     return false
                 }
-                // External links opened in system browser
-                if (request.hasGesture() && (request.url.scheme == "https" || request.url.scheme == "http")) {
-                    openExternalBrowser(request.url)
+                if (request.hasGesture() && (uri.scheme == "https" || uri.scheme == "http")) {
+                    openExternalBrowser(uri)
                     return true
                 }
                 return false
             }
 
+            override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
+                super.doUpdateVisitedHistory(view, url, isReload)
+                updateBackInvokedCallbackState()
+            }
+
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
-                // Persist session cookies immediately
+                updateBackInvokedCallbackState()
                 CookieManager.getInstance().flush()
+                // Inject clipboard fallback polyfill
+                view?.evaluateJavascript(CLIPBOARD_POLYFILL_JS, null)
             }
 
             override fun onReceivedSslError(view: WebView?, handler: SslErrorHandler?, error: SslError?) {
                 handler?.cancel() // Strict TLS enforcement
             }
+
+            override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
+                super.onReceivedError(view, request, error)
+                if (request?.isForMainFrame == true) {
+                    Toast.makeText(this@MainActivity, "Connection failed. Check network.", Toast.LENGTH_SHORT).show()
+                }
+            }
         }
 
         browser.webChromeClient = object : WebChromeClient() {
-            // Camera / Image / File selector
             override fun onShowFileChooser(
                 view: WebView,
                 filePathCallback: ValueCallback<Array<Uri>>,
                 params: FileChooserParams
             ): Boolean = openFileChooser(filePathCallback, params)
 
-            // Google OAuth Popups (target="_blank" or window.open)
             override fun onCreateWindow(
                 view: WebView?,
                 isDialog: Boolean,
@@ -220,23 +355,71 @@ class MainActivity : Activity() {
                         WindowManager.LayoutParams.MATCH_PARENT
                     )
                 }
+                activePopupDialog = popupDialog
+
+                popupDialog.setOnKeyListener { _, keyCode, event ->
+                    if (keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_UP) {
+                        if (popupWebView.canGoBack()) {
+                            popupWebView.goBack()
+                            true
+                        } else {
+                            popupDialog.dismiss()
+                            true
+                        }
+                    } else false
+                }
 
                 popupWebView.webChromeClient = object : WebChromeClient() {
                     override fun onCloseWindow(window: WebView?) {
                         popupDialog.dismiss()
-                        window?.destroy()
                     }
+
+                    override fun onShowFileChooser(
+                        vw: WebView,
+                        cb: ValueCallback<Array<Uri>>,
+                        fp: FileChooserParams
+                    ): Boolean = openFileChooser(cb, fp)
                 }
 
                 popupWebView.webViewClient = object : WebViewClient() {
+                    override fun shouldOverrideUrlLoading(v: WebView, req: WebResourceRequest): Boolean {
+                        val uri = req.url
+                        val uriString = uri.toString()
+                        // If OAuth redirects back to the main console, route back to parent WebView
+                        if (uriString.startsWith(targetUrl)) {
+                            popupDialog.dismiss()
+                            this@MainActivity.webView?.loadUrl(uriString)
+                            return true
+                        }
+                        if (isTrustedInternalOrAuthHost(uri)) {
+                            return false
+                        }
+                        if (req.hasGesture()) {
+                            openExternalBrowser(uri)
+                            return true
+                        }
+                        return false
+                    }
+
                     override fun onPageFinished(v: WebView?, url: String?) {
                         super.onPageFinished(v, url)
                         CookieManager.getInstance().flush()
                     }
+
+                    override fun onReceivedSslError(v: WebView?, handler: SslErrorHandler?, error: SslError?) {
+                        handler?.cancel()
+                    }
                 }
 
                 popupDialog.setOnDismissListener {
-                    popupWebView.destroy()
+                    if (activePopupDialog === popupDialog) activePopupDialog = null
+                    popupWebView.apply {
+                        stopLoading()
+                        webChromeClient = null
+                        webViewClient = WebViewClient()
+                        (parent as? ViewGroup)?.removeView(this)
+                        destroy()
+                    }
                 }
 
                 val transport = resultMsg.obj as WebView.WebViewTransport
@@ -248,6 +431,35 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun isTrustedInternalOrAuthHost(uri: Uri): Boolean {
+        val host = uri.host?.lowercase() ?: return false
+        val scheme = uri.scheme?.lowercase() ?: return false
+        if (scheme != "https" && scheme != "http") return false
+
+        // Exact match for target console
+        if (host == "antigravity.google.com") return true
+
+        // Strict Google Identity & OAuth domains
+        val isGoogleDomain = host == "google.com" || host.endsWith(".google.com") ||
+            host == "google.cn" || host.endsWith(".google.cn") ||
+            host == "gstatic.com" || host.endsWith(".gstatic.com") ||
+            host == "googleapis.com" || host.endsWith(".googleapis.com") ||
+            host == "googleusercontent.com" || host.endsWith(".googleusercontent.com") ||
+            Regex("^accounts\\.google\\.[a-z.]+$").matches(host)
+
+        if (isGoogleDomain) return true
+
+        // Known Enterprise Workspace SSO Identity Providers
+        val isCommonIdP = host.endsWith(".okta.com") ||
+            host.endsWith(".onelogin.com") ||
+            host == "login.microsoftonline.com" ||
+            host.endsWith(".pingidentity.com") ||
+            host.endsWith(".duosecurity.com") ||
+            host.endsWith(".cloudflareaccess.com")
+
+        return isCommonIdP
+    }
+
     private fun openFileChooser(
         callback: ValueCallback<Array<Uri>>,
         params: WebChromeClient.FileChooserParams
@@ -255,10 +467,18 @@ class MainActivity : Activity() {
         uploadCallback?.onReceiveValue(null)
         uploadCallback = callback
 
+        val mimeTypeMap = MimeTypeMap.getSingleton()
         val mimeTypes = params.acceptTypes
             ?.flatMap { it.split(',') }
             ?.map { it.trim().lowercase() }
-            ?.filter { it.contains('/') }
+            ?.mapNotNull { token ->
+                when {
+                    token.contains('/') -> token
+                    token.startsWith('.') -> mimeTypeMap.getMimeTypeFromExtension(token.removePrefix("."))
+                    token.isNotEmpty() -> mimeTypeMap.getMimeTypeFromExtension(token)
+                    else -> null
+                }
+            }
             ?.distinct()
             ?.ifEmpty { listOf("*/*") } ?: listOf("*/*")
 
@@ -271,7 +491,7 @@ class MainActivity : Activity() {
         }
 
         return try {
-            startActivityForResult(Intent.createChooser(intent, "Select Attachment"), REQUEST_FILE_CHOOSER)
+            startActivityForResult(intent, REQUEST_FILE_CHOOSER)
             true
         } catch (_: ActivityNotFoundException) {
             uploadCallback?.onReceiveValue(null)
@@ -280,6 +500,7 @@ class MainActivity : Activity() {
         }
     }
 
+    @Suppress("DEPRECATION")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == REQUEST_FILE_CHOOSER) {
@@ -308,53 +529,27 @@ class MainActivity : Activity() {
         }
     }
 
-    @Suppress("DEPRECATION")
     private fun configureEdgeToEdge(window: Window) {
         window.statusBarColor = Color.TRANSPARENT
         window.navigationBarColor = Color.TRANSPARENT
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            window.setDecorFitsSystemWindows(false)
-        } else {
-            window.decorView.systemUiVisibility = window.decorView.systemUiVisibility or
-                View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
-                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
-                View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.isStatusBarContrastEnforced = false
+            window.isNavigationBarContrastEnforced = false
         }
+        WindowCompat.setDecorFitsSystemWindows(window, false)
     }
 
-    @Suppress("DEPRECATION")
-    private fun applyStatusBarContrast(window: Window, color: Int) {
-        val red = color shr 16 and 0xff
-        val green = color shr 8 and 0xff
-        val blue = color and 0xff
-        val darkIcons = red * 299 + green * 587 + blue * 114 >= 186_000
-
-        window.decorView.systemUiVisibility = if (darkIcons) {
-            window.decorView.systemUiVisibility or View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
-        } else {
-            window.decorView.systemUiVisibility and View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR.inv()
-        }
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        val isNightMode = (newConfig.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
+        updateSystemBarContrast(isNightMode)
     }
 
-    @Suppress("DEPRECATION")
-    private fun resolveTopSafeInset(insets: WindowInsets): Int =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            val status = insets.getInsets(WindowInsets.Type.statusBars()).top
-            val cutout = insets.getInsets(WindowInsets.Type.displayCutout()).top
-            maxOf(status, cutout)
-        } else {
-            maxOf(insets.systemWindowInsetTop, insets.displayCutout?.safeInsetTop ?: 0)
-        }
-
-    @Suppress("DEPRECATION")
-    private fun resolveImeInset(insets: WindowInsets): Int =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            val ime = insets.getInsets(WindowInsets.Type.ime()).bottom
-            val nav = insets.getInsets(WindowInsets.Type.navigationBars()).bottom
-            maxOf(0, ime - nav)
-        } else {
-            maxOf(0, insets.systemWindowInsetBottom - insets.stableInsetBottom)
-        }
+    private fun updateSystemBarContrast(isNightMode: Boolean) {
+        val insetsController = WindowCompat.getInsetsController(window, window.decorView)
+        insetsController.isAppearanceLightStatusBars = !isNightMode
+        insetsController.isAppearanceLightNavigationBars = !isNightMode
+    }
 
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
@@ -379,10 +574,15 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         CookieManager.getInstance().flush()
+        activePopupDialog?.let {
+            if (it.isShowing) it.dismiss()
+        }
+        activePopupDialog = null
         webView?.apply {
             stopLoading()
             webChromeClient = null
             webViewClient = WebViewClient()
+            removeJavascriptInterface("AntigravityNative")
             (parent as? ViewGroup)?.removeView(this)
             removeAllViews()
             destroy()
@@ -391,7 +591,60 @@ class MainActivity : Activity() {
         super.onDestroy()
     }
 
+    /**
+     * Native bridge allowing web buttons to copy cleanly into Android ClipboardManager.
+     */
+    private class ClipboardBridge(private val context: Context) {
+        @JavascriptInterface
+        fun copyText(text: String): Boolean {
+            return try {
+                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                val clip = ClipData.newPlainText("Copied Text", text)
+                clipboard.setPrimaryClip(clip)
+                true
+            } catch (_: Exception) {
+                false
+            }
+        }
+    }
+
     companion object {
         private const val REQUEST_FILE_CHOOSER = 4101
+
+        private const val CLIPBOARD_POLYFILL_JS = """
+(function() {
+    if (window.__antigravityClipboardInjected) return;
+    window.__antigravityClipboardInjected = true;
+    
+    const fallbackCopy = function(text) {
+        if (window.AntigravityNative && window.AntigravityNative.copyText) {
+            return window.AntigravityNative.copyText(text);
+        }
+        return false;
+    };
+
+    if (!navigator.clipboard) {
+        navigator.clipboard = {};
+    }
+    
+    const originalWriteText = navigator.clipboard.writeText ? navigator.clipboard.writeText.bind(navigator.clipboard) : null;
+
+    navigator.clipboard.writeText = function(text) {
+        if (originalWriteText) {
+            return originalWriteText(text).catch(function() {
+                if (fallbackCopy(text)) {
+                    return Promise.resolve();
+                }
+                return Promise.reject(new Error("Failed to copy via native bridge"));
+            });
+        } else {
+            if (fallbackCopy(text)) {
+                return Promise.resolve();
+            }
+            return Promise.reject(new Error("Clipboard API not available"));
+        }
+    };
+})();
+"""
     }
 }

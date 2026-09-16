@@ -41,9 +41,9 @@ jobs:
           java-version: '17'
 
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
         with:
-          packages: platform-tools
+          packages: 'platform-tools'
 
       - name: Install Android Platform & Build Tools
         run: |
@@ -59,7 +59,7 @@ jobs:
       - name: Build with Gradle
         working-directory: mobile/android
         run: |
-          BUILD_TYPE="${{ github.event.inputs.build_type || 'release' }}"
+          BUILD_TYPE="${{ inputs.build_type || github.event.inputs.build_type || 'release' }}"
           set -o pipefail
           if [ "$BUILD_TYPE" = "debug" ]; then
             echo "🔨 Building Debug APK..."
@@ -77,13 +77,15 @@ jobs:
             echo "::error::$line"
           done
 
-      - name: Sign & Align Release APK (v2 & v3 Scheme)
+      - name: Sign & Align Release APK (v1, v2 & v3 Scheme)
         working-directory: mobile/android
         run: |
-          BUILD_TOOLS=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -n 1)
+          SDK_DIR="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          BUILD_TOOLS=$(ls -d $SDK_DIR/build-tools/* | sort -V | tail -n 1)
           echo "Using Android Build-Tools from: $BUILD_TOOLS"
 
           mkdir -p dist
+          rm -f dist/*
 
           UNSIGNED_APK=$(find app/build/outputs/apk -name "*unsigned.apk" | head -n 1)
           SIGNED_APK=$(find app/build/outputs/apk -name "*release.apk" ! -name "*unsigned.apk" | head -n 1)
@@ -94,46 +96,76 @@ jobs:
             STORE_PASS="antigravity"
             KEY_PASS="antigravity"
             ALIAS="antigravity-ci"
-            keytool -genkey -v -keystore release.keystore -alias "$ALIAS" \
+
+            keytool -genkeypair -v -keystore release.keystore -alias "$ALIAS" \
               -keyalg RSA -keysize 2048 -validity 10000 \
+              -storetype PKCS12 \
               -storepass "$STORE_PASS" -keypass "$KEY_PASS" \
               -dname "CN=Antigravity, OU=Mobile, O=YJH, L=Cloud, S=Cloud, C=CN"
 
             echo "🚀 4-byte zipalign..."
-            $BUILD_TOOLS/zipalign -v -p 4 "$UNSIGNED_APK" dist/app-release-aligned.apk
+            $BUILD_TOOLS/zipalign -f -v -p 4 "$UNSIGNED_APK" dist/app-release-aligned.apk
 
-            echo "✍️ Signing with apksigner (v2 & v3)..."
+            echo "✍️ Signing with apksigner (v1, v2 & v3)..."
             $BUILD_TOOLS/apksigner sign --ks release.keystore \
               --ks-key-alias "$ALIAS" \
               --ks-pass "pass:$STORE_PASS" \
               --key-pass "pass:$KEY_PASS" \
+              --v1-signing-enabled true \
               --v2-signing-enabled true \
               --v3-signing-enabled true \
+              --v4-signing-enabled false \
               --out dist/Antigravity-v1.0.apk \
               dist/app-release-aligned.apk
 
-            $BUILD_TOOLS/apksigner verify --verbose dist/Antigravity-v1.0.apk
-
           elif [ -n "$SIGNED_APK" ]; then
-            echo "✅ Release APK ready."
+            echo "✅ Release APK already signed by Gradle."
             cp "$SIGNED_APK" dist/Antigravity-v1.0.apk
           elif [ -n "$DEBUG_APK" ]; then
             echo "✅ Debug APK ready."
             cp "$DEBUG_APK" dist/Antigravity-debug.apk
+          else
+            echo "::error::No APK file found in app/build/outputs/apk!"
+            exit 1
           fi
+
+          # Ensure output APK exists
+          if [ ! -f dist/Antigravity-v1.0.apk ] && [ ! -f dist/Antigravity-debug.apk ]; then
+            echo "::error::Failed to produce APK in dist/ directory"
+            exit 1
+          fi
+
+          # Verify signatures on release APK
+          if [ -f dist/Antigravity-v1.0.apk ]; then
+            echo "🔍 Verifying release APK signature & alignment..."
+            $BUILD_TOOLS/zipalign -c -v 4 dist/Antigravity-v1.0.apk
+            $BUILD_TOOLS/apksigner verify --verbose --print-certs dist/Antigravity-v1.0.apk
+          fi
+
+          # Compute SHA-256 Checksums
+          echo "📝 Generating SHA-256 checksums..."
+          (cd dist && sha256sum *.apk > SHA256SUMS.txt)
+          cat dist/SHA256SUMS.txt
 
       - name: Upload APK as Workflow Artifact
         uses: actions/upload-artifact@v4
         with:
           name: Antigravity-Mobile-APK
-          path: mobile/android/dist/*.apk
+          path: |
+            mobile/android/dist/*.apk
+            mobile/android/dist/SHA256SUMS.txt
+          if-no-files-found: error
           retention-days: 30
 
       - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.create_release == true)
+        if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && (inputs.create_release == true || inputs.create_release == 'true'))
         uses: softprops/action-gh-release@v2
         with:
-          files: mobile/android/dist/*.apk
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v1.0.{0}', github.run_number) }}
+          name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('Antigravity v1.0 (Build {0})', github.run_number) }}
+          files: |
+            mobile/android/dist/*.apk
+            mobile/android/dist/SHA256SUMS.txt
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
