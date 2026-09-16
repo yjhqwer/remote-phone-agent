@@ -43,7 +43,7 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.7'
+          gradle-version: '8.9'
 
       - name: Make Gradle Wrapper Executable
         run: chmod +x mobile/android/gradlew
@@ -58,10 +58,19 @@ jobs:
           BUILD_TYPE="${{ github.event.inputs.build_type || 'release' }}"
           if [ "$BUILD_TYPE" = "debug" ]; then
             echo "🔨 Building Debug APK..."
-            ./gradlew assembleDebug --stacktrace
+            ./gradlew assembleDebug --stacktrace --no-daemon
           else
             echo "🔨 Building Release APK..."
-            ./gradlew assembleRelease --stacktrace
+            ./gradlew assembleRelease --stacktrace --no-daemon
+          fi
+
+      - name: Diagnostic Log on Failure
+        if: failure()
+        working-directory: mobile/android
+        run: |
+          echo "==== GRADLE FAILURE DIAGNOSTICS ===="
+          if [ -d "app/build/reports" ]; then
+            find app/build/reports -type f -exec head -n 50 {} +
           fi
 
       - name: Sign & Align Release APK (v2 & v3 Scheme)
