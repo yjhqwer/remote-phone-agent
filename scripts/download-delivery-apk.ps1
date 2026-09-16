@@ -21,7 +21,7 @@ param (
     [string]$ArtifactName = "Antigravity-Mobile-APK",
 
     [Parameter()]
-    [string]$TargetDirectory = "G:\我的云端硬盘\apk",
+    [string]$TargetDirectory = $(Join-Path "G:\" (Join-Path [System.Text.Encoding]::UTF8.GetString([System.Text.Encoding]::UTF8.GetBytes("我的云端硬盘")) "apk")),
 
     [Parameter()]
     [string]$TargetFileName = "Antigravity-v1.0.apk",
