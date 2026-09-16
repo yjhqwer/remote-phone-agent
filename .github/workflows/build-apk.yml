@@ -1,0 +1,136 @@
+name: Build & Release Antigravity Mobile APK
+
+on:
+  push:
+    branches: [ "main", "master" ]
+    tags: [ "v*" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build variant'
+        required: true
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - debug
+      create_release:
+        description: 'Publish as a GitHub Release'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Ensure Gradle Wrapper Exists
+        working-directory: mobile/android
+        run: |
+          if [ ! -f "gradlew" ] || [ ! -f "gradle/wrapper/gradle-wrapper.jar" ]; then
+            echo "⚡ Generating Gradle Wrapper..."
+            gradle wrapper --gradle-version 8.7 --distribution-type bin
+          fi
+          chmod +x gradlew
+
+      - name: Accept Android SDK Licenses
+        run: |
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+
+      - name: Build with Gradle
+        working-directory: mobile/android
+        run: |
+          BUILD_TYPE="${{ github.event.inputs.build_type || 'release' }}"
+          CMD="./gradlew"
+          if [ ! -x "./gradlew" ]; then
+            CMD="gradle"
+          fi
+          if [ "$BUILD_TYPE" = "debug" ]; then
+            echo "🔨 Building Debug APK..."
+            $CMD assembleDebug --stacktrace
+          else
+            echo "🔨 Building Release APK..."
+            $CMD assembleRelease --stacktrace
+          fi
+
+      - name: Sign & Align Release APK (v2 & v3 Scheme)
+        working-directory: mobile/android
+        run: |
+          BUILD_TOOLS=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -n 1)
+          echo "Using Android Build-Tools from: $BUILD_TOOLS"
+
+          mkdir -p dist
+
+          UNSIGNED_APK=$(find app/build/outputs/apk -name "*unsigned.apk" | head -n 1)
+          SIGNED_APK=$(find app/build/outputs/apk -name "*release.apk" ! -name "*unsigned.apk" | head -n 1)
+          DEBUG_APK=$(find app/build/outputs/apk -name "*debug.apk" | head -n 1)
+
+          if [ -n "$UNSIGNED_APK" ]; then
+            echo "📦 Found unsigned APK: $UNSIGNED_APK"
+            STORE_PASS="antigravity"
+            KEY_PASS="antigravity"
+            ALIAS="antigravity-ci"
+            keytool -genkey -v -keystore release.keystore -alias "$ALIAS" \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass "$STORE_PASS" -keypass "$KEY_PASS" \
+              -dname "CN=Antigravity, OU=Mobile, O=YJH, L=Cloud, S=Cloud, C=CN"
+
+            echo "🚀 4-byte zipalign..."
+            $BUILD_TOOLS/zipalign -v -p 4 "$UNSIGNED_APK" dist/app-release-aligned.apk
+
+            echo "✍️ Signing with apksigner (v2 & v3)..."
+            $BUILD_TOOLS/apksigner sign --ks release.keystore \
+              --ks-key-alias "$ALIAS" \
+              --ks-pass "pass:$STORE_PASS" \
+              --key-pass "pass:$KEY_PASS" \
+              --v2-signing-enabled true \
+              --v3-signing-enabled true \
+              --out dist/Antigravity-v1.0.apk \
+              dist/app-release-aligned.apk
+
+            $BUILD_TOOLS/apksigner verify --verbose dist/Antigravity-v1.0.apk
+
+          elif [ -n "$SIGNED_APK" ]; then
+            echo "✅ Release APK ready."
+            cp "$SIGNED_APK" dist/Antigravity-v1.0.apk
+          elif [ -n "$DEBUG_APK" ]; then
+            echo "✅ Debug APK ready."
+            cp "$DEBUG_APK" dist/Antigravity-debug.apk
+          fi
+
+      - name: Upload APK as Workflow Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Antigravity-Mobile-APK
+          path: mobile/android/dist/*.apk
+          retention-days: 30
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.create_release == true)
+        uses: softprops/action-gh-release@v2
+        with:
+          files: mobile/android/dist/*.apk
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
