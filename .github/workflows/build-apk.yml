@@ -56,22 +56,22 @@ jobs:
         working-directory: mobile/android
         run: |
           BUILD_TYPE="${{ github.event.inputs.build_type || 'release' }}"
+          set -o pipefail
           if [ "$BUILD_TYPE" = "debug" ]; then
             echo "🔨 Building Debug APK..."
-            ./gradlew assembleDebug --stacktrace --no-daemon
+            ./gradlew assembleDebug --stacktrace --no-daemon 2>&1 | tee /tmp/gradle.log
           else
             echo "🔨 Building Release APK..."
-            ./gradlew assembleRelease --stacktrace --no-daemon
+            ./gradlew assembleRelease --stacktrace --no-daemon 2>&1 | tee /tmp/gradle.log
           fi
 
       - name: Diagnostic Log on Failure
         if: failure()
-        working-directory: mobile/android
         run: |
-          echo "==== GRADLE FAILURE DIAGNOSTICS ===="
-          if [ -d "app/build/reports" ]; then
-            find app/build/reports -type f -exec head -n 50 {} +
-          fi
+          echo "::error title=Gradle Build Failed::See diagnostic lines below"
+          tail -n 80 /tmp/gradle.log | while IFS= read -r line; do
+            echo "::error::$line"
+          done
 
       - name: Sign & Align Release APK (v2 & v3 Scheme)
         working-directory: mobile/android
