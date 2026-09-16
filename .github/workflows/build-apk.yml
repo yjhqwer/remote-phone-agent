@@ -45,33 +45,23 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      - name: Ensure Gradle Wrapper Exists
-        working-directory: mobile/android
-        run: |
-          if [ ! -f "gradlew" ] || [ ! -f "gradle/wrapper/gradle-wrapper.jar" ]; then
-            echo "⚡ Generating Gradle Wrapper..."
-            gradle wrapper --gradle-version 8.7 --distribution-type bin
-          fi
-          chmod +x gradlew
+      - name: Make Gradle Wrapper Executable
+        run: chmod +x mobile/android/gradlew
 
       - name: Accept Android SDK Licenses
         run: |
-          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+          yes | sdkmanager --licenses 2>/dev/null || yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses 2>/dev/null || true
 
       - name: Build with Gradle
         working-directory: mobile/android
         run: |
           BUILD_TYPE="${{ github.event.inputs.build_type || 'release' }}"
-          CMD="./gradlew"
-          if [ ! -x "./gradlew" ]; then
-            CMD="gradle"
-          fi
           if [ "$BUILD_TYPE" = "debug" ]; then
             echo "🔨 Building Debug APK..."
-            $CMD assembleDebug --stacktrace
+            ./gradlew assembleDebug --stacktrace
           else
             echo "🔨 Building Release APK..."
-            $CMD assembleRelease --stacktrace
+            ./gradlew assembleRelease --stacktrace
           fi
 
       - name: Sign & Align Release APK (v2 & v3 Scheme)
