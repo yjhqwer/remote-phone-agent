@@ -1,0 +1,20 @@
+﻿# Logs and screenshots
+*.log
+*.png
+*.jpg
+*.jpeg
+*.mp4
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Node
+node_modules/
+npm-debug.log*
+
+# ADB temporary files
+platform-tools/
+*.apk

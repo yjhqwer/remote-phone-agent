@@ -1,0 +1,9 @@
+﻿{
+  "mcpServers": {
+    "android-controller": {
+      "command": "/usr/local/bin/scrcpy-mcp",
+      "args": [],
+      "env": {}
+    }
+  }
+}
