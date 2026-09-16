@@ -91,7 +91,10 @@ jobs:
           SIGNED_APK=$(find app/build/outputs/apk -name "*release.apk" ! -name "*unsigned.apk" | head -n 1)
           DEBUG_APK=$(find app/build/outputs/apk -name "*debug.apk" | head -n 1)
 
-          if [ -n "$UNSIGNED_APK" ]; then
+          if [ -n "$SIGNED_APK" ]; then
+            echo "✅ Release APK already signed by Gradle: $SIGNED_APK"
+            cp "$SIGNED_APK" dist/Antigravity-v1.0.apk
+          elif [ -n "$UNSIGNED_APK" ]; then
             echo "📦 Found unsigned APK: $UNSIGNED_APK"
             STORE_PASS="antigravity"
             KEY_PASS="antigravity"
@@ -117,10 +120,6 @@ jobs:
               --v4-signing-enabled false \
               --out dist/Antigravity-v1.0.apk \
               dist/app-release-aligned.apk
-
-          elif [ -n "$SIGNED_APK" ]; then
-            echo "✅ Release APK already signed by Gradle."
-            cp "$SIGNED_APK" dist/Antigravity-v1.0.apk
           elif [ -n "$DEBUG_APK" ]; then
             echo "✅ Debug APK ready."
             cp "$DEBUG_APK" dist/Antigravity-debug.apk

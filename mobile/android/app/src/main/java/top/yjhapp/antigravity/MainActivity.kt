@@ -8,14 +8,18 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.res.ColorStateList
 import android.content.res.Configuration
+import android.graphics.Bitmap
 import android.graphics.Color
+import android.graphics.Typeface
 import android.hardware.display.DisplayManager
 import android.net.Uri
 import android.net.http.SslError
 import android.os.Build
 import android.os.Bundle
 import android.os.Message
+import android.util.TypedValue
 import android.view.Display
 import android.view.Gravity
 import android.view.KeyEvent
@@ -34,7 +38,11 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.Button
 import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.widget.ProgressBar
+import android.widget.TextView
 import android.widget.Toast
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
@@ -48,6 +56,8 @@ class MainActivity : Activity() {
 
     private var webView: WebView? = null
     private var statusBarBackdrop: View? = null
+    private var loadingBar: ProgressBar? = null
+    private var errorLayout: LinearLayout? = null
     private var uploadCallback: ValueCallback<Array<Uri>>? = null
     private var activePopupDialog: Dialog? = null
 
@@ -174,12 +184,62 @@ class MainActivity : Activity() {
         }
         webView = browser
 
+        // Elegant Material 3 horizontal loading progress bar
+        val pBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            isIndeterminate = false
+            max = 100
+            progressTintList = ColorStateList.valueOf(Color.parseColor("#4285F4")) // Google Blue
+            visibility = View.GONE
+        }
+        loadingBar = pBar
+
+        // Diagnostic Error & Retry Screen (shown when network fails or proxy is off)
+        val errView = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setBackgroundColor(Color.parseColor("#131314"))
+            visibility = View.GONE
+            setPadding(48, 48, 48, 48)
+
+            val titleText = TextView(this@MainActivity).apply {
+                text = "无法连接到 Google Antigravity"
+                setTextColor(Color.WHITE)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
+                typeface = Typeface.DEFAULT_BOLD
+                gravity = Gravity.CENTER
+            }
+            val descText = TextView(this@MainActivity).apply {
+                text = "请确认手机已开启代理服务（如 bwg-LA-v6 节点）后点击重试"
+                setTextColor(Color.parseColor("#9AA0A6"))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                gravity = Gravity.CENTER
+                setPadding(0, 16, 0, 32)
+            }
+            val retryBtn = Button(this@MainActivity).apply {
+                text = "重新连接"
+                setTextColor(Color.BLACK)
+                setBackgroundColor(Color.parseColor("#8AB4F8")) // Google Soft Blue
+                setOnClickListener {
+                    visibility = View.GONE
+                    pBar.visibility = View.VISIBLE
+                    browser.reload()
+                }
+            }
+
+            addView(titleText)
+            addView(descText)
+            addView(retryBtn)
+        }
+        errorLayout = errView
+
         configureWebSettings(browser)
         configureCookieManager(browser)
         setupWebClients(browser)
 
         root.addView(browser, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         root.addView(backdrop, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, Gravity.TOP))
+        root.addView(pBar, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 6, Gravity.TOP))
+        root.addView(errView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         setContentView(root)
 
         // Safe Area Insets and Keyboard (IME) handling:
@@ -196,12 +256,20 @@ class MainActivity : Activity() {
                 height = topSafe
             }
 
+            pBar.updateLayoutParams<FrameLayout.LayoutParams> {
+                topMargin = topSafe
+            }
+
             browser.updateLayoutParams<FrameLayout.LayoutParams> {
                 topMargin = topSafe
                 bottomMargin = bottomInset
             }
 
-            // Return insets unconsumed to allow Chromium's visual viewport to receive insets
+            errView.updateLayoutParams<FrameLayout.LayoutParams> {
+                topMargin = topSafe
+                bottomMargin = bottomInset
+            }
+
             insets
         }
 
@@ -304,6 +372,12 @@ class MainActivity : Activity() {
                 return false
             }
 
+            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                super.onPageStarted(view, url, favicon)
+                loadingBar?.visibility = View.VISIBLE
+                errorLayout?.visibility = View.GONE
+            }
+
             override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
                 super.doUpdateVisitedHistory(view, url, isReload)
                 updateBackInvokedCallbackState()
@@ -311,6 +385,7 @@ class MainActivity : Activity() {
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
+                loadingBar?.visibility = View.GONE
                 updateBackInvokedCallbackState()
                 CookieManager.getInstance().flush()
                 // Inject clipboard fallback polyfill
@@ -324,12 +399,23 @@ class MainActivity : Activity() {
             override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
                 super.onReceivedError(view, request, error)
                 if (request?.isForMainFrame == true) {
-                    Toast.makeText(this@MainActivity, "Connection failed. Check network.", Toast.LENGTH_SHORT).show()
+                    loadingBar?.visibility = View.GONE
+                    errorLayout?.visibility = View.VISIBLE
                 }
             }
         }
 
         browser.webChromeClient = object : WebChromeClient() {
+            override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                super.onProgressChanged(view, newProgress)
+                loadingBar?.progress = newProgress
+                if (newProgress >= 100) {
+                    loadingBar?.visibility = View.GONE
+                } else if (newProgress in 1..99 && errorLayout?.visibility != View.VISIBLE) {
+                    loadingBar?.visibility = View.VISIBLE
+                }
+            }
+
             override fun onShowFileChooser(
                 view: WebView,
                 filePathCallback: ValueCallback<Array<Uri>>,

@@ -1,6 +1,7 @@
-﻿# Logs and screenshots
+# Logs and screenshots
 *.log
 *.png
+!mobile/android/app/src/main/res/**/*.png
 *.jpg
 *.jpeg
 *.mp4
