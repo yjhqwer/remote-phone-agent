@@ -40,17 +40,21 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Install Android Platform & Build Tools
+        run: |
+          yes | sdkmanager --licenses 2>/dev/null || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.9'
 
       - name: Make Gradle Wrapper Executable
         run: chmod +x mobile/android/gradlew
-
-      - name: Accept Android SDK Licenses
-        run: |
-          yes | sdkmanager --licenses 2>/dev/null || yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses 2>/dev/null || true
 
       - name: Build with Gradle
         working-directory: mobile/android
@@ -59,17 +63,17 @@ jobs:
           set -o pipefail
           if [ "$BUILD_TYPE" = "debug" ]; then
             echo "🔨 Building Debug APK..."
-            ./gradlew assembleDebug --stacktrace --no-daemon 2>&1 | tee /tmp/gradle.log
+            bash ./gradlew --no-daemon assembleDebug --stacktrace 2>&1 | tee /tmp/gradle.log
           else
             echo "🔨 Building Release APK..."
-            ./gradlew assembleRelease --stacktrace --no-daemon 2>&1 | tee /tmp/gradle.log
+            bash ./gradlew --no-daemon assembleRelease --stacktrace 2>&1 | tee /tmp/gradle.log
           fi
 
       - name: Diagnostic Log on Failure
         if: failure()
         run: |
-          echo "::error title=Gradle Build Failed::See diagnostic lines below"
-          tail -n 80 /tmp/gradle.log | while IFS= read -r line; do
+          echo "::error title=Gradle Build Failed::See build failure lines below"
+          grep -C 5 -E "FAILURE:|What went wrong:|Compilation error|e: " /tmp/gradle.log | head -n 30 | while IFS= read -r line; do
             echo "::error::$line"
           done
 
